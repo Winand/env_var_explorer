@@ -17,12 +17,12 @@ RST='\033[0m'
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") VARNAME
+Usage: $(basename "$0") [OPTIONS] VARNAME
 
 Search for where an environment variable is defined across:
   - System-wide shell init  (/etc/bashrc, /etc/profile, etc.)
   - User shell init files   (~/.bashrc, ~/.bash_profile, etc.)
-  - PAM environment         (/etc/security/pam_env.conf)
+  - PAM environment         (/etc/security/)
   - systemd unit files      (Environment= and EnvironmentFile= directives,
                              with recursive scanning of referenced files)
   - Sysconfig / app dirs    (/etc/sysconfig/, /etc/default/, /etc/conf.d/)
@@ -32,16 +32,38 @@ Search for where an environment variable is defined across:
 Unreadable locations are skipped with a notice; re-run with sudo for full coverage.
 
 Options:
-  -h, --help    Show this help and exit
+  -h, --help          Show this help and exit
+  --skip-units        Skip scanning systemd unit files
+  --skip-docker       Skip scanning running Docker containers
 
 Example:
   $(basename "$0") AIRFLOW_HOME
+  $(basename "$0") --skip-units AIRFLOW_HOME
 EOF
-    exit 0
 }
 
-[[ $# -lt 1 ]]                          && { echo "Error: VARNAME required."; echo "Try '$(basename "$0") --help'"; exit 1; }
-[[ "$1" == "--help" || "$1" == "-h" ]]  && usage
+ARGS=$(getopt -o 'h' --long 'help,skip-units,skip-docker' -n "$(basename "$0")" -- "$@")
+if [[ $? -ne 0 ]]; then usage; exit 1; fi
+eval set -- "$ARGS"
+
+SKIP_UNITS=0
+SKIP_DOCKER=0
+
+while true; do
+    case "$1" in
+        -h | --help)        usage; exit 0 ;;
+        --skip-units)       SKIP_UNITS=1;  shift ;;
+        --skip-docker)      SKIP_DOCKER=1; shift ;;
+        --)                 shift; break ;;  # End of options
+        *)                  echo "Internal error!"; exit 1 ;;
+    esac
+done
+
+if [[ $# -lt 1 ]]; then
+    echo "Error: VARNAME required."
+    usage
+    exit 1
+fi
 
 VARNAME="$1"
 FOUND=0
@@ -105,6 +127,9 @@ search_dir  /etc/security 1
 
 # ── 4. systemd units ──────────────────────────────────────────────────────────
 header "systemd unit files"
+if [[ $SKIP_UNITS -eq 1 ]]; then
+    echo -e "  ${DIM}(skipped via --skip-units)${RST}"
+else
 i=0
 for unit_dir in /etc/systemd/system /usr/lib/systemd/system /run/systemd/system; do
     [[ -d "$unit_dir" ]] || continue
@@ -140,6 +165,7 @@ for unit_dir in /etc/systemd/system /usr/lib/systemd/system /run/systemd/system;
     done < <(find "$unit_dir" -maxdepth 2 -type f -print0 2>/dev/null)
 done
 clear_progress
+fi  # --skip-units
 
 # ── 5. Common application / sysconfig dirs ────────────────────────────────────
 header "Application / sysconfig files"
@@ -171,7 +197,9 @@ fi
 
 # ── 7. Running Docker containers ──────────────────────────────────────────────
 header "Running Docker containers"
-if ! command -v docker &>/dev/null; then
+if [[ $SKIP_DOCKER -eq 1 ]]; then
+    echo -e "  ${DIM}(skipped via --skip-docker)${RST}"
+elif ! command -v docker &>/dev/null; then
     echo -e "  ${DIM}(docker not found in PATH, skipping)${RST}"
 elif ! docker info &>/dev/null 2>&1; then
     echo -e "  ${DIM}(docker daemon not reachable without root, skipping)${RST}"
