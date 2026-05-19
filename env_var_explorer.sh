@@ -188,9 +188,9 @@ for environ_file in /proc/*/environ; do
         comm=$(cat "/proc/${pid}/comm" 2>/dev/null || echo "?")
         ppid=$(awk '/^PPid:/{print $2}' "/proc/${pid}/status" 2>/dev/null || echo "?")
         pcomm=$(cat "/proc/${ppid}/comm" 2>/dev/null || echo "?")
-        (( pid = $PPID )) && this_proc=true || unset this_proc
-        echo -e "  ${GRN}✔ PID ${pid} (${comm})  ←  PPID ${ppid} (${pcomm})${DIM}${this_proc:+this}${RST}"
-        echo -e "    ${YEL}${value}${RST}"
+        (( pid == $PPID )) && this_proc=true || unset this_proc
+        echo -e "  ${GRN}✔ PID ${pid} (${comm})  ←  PPID ${ppid} (${pcomm})${DIM}${this_proc:+ this}${RST}"
+        printf  "    ${YEL}%s${RST}\n" "${value}"  # do not interpret escape sequences in $value
         FOUND=1; found_procs=1
     fi
 done
