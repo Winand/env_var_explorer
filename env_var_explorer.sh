@@ -136,7 +136,8 @@ for unit_dir in /etc/systemd/system /usr/lib/systemd/system /run/systemd/system;
         [[ -r "$f" ]] || continue
         printf "\r  ${DIM}Scanning unit %d: %-50s${RST}\r" "$((++i))" "$(basename "$f")"
 
-        matches=$(grep -niE "^\s*(Environment|EnvironmentFile).*${VARNAME}" "$f" 2>/dev/null || true)
+        # \b ensures VARNAME is matched as a whole word, so PATH won't match LOGPATH etc.
+        matches=$(grep -niE "^\s*Environment=.*\b${VARNAME}=" "$f" 2>/dev/null || true)
         if [[ -n "$matches" ]]; then
             clear_progress
             echo -e "  ${GRN}✔ ${f}${RST}"
