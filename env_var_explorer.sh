@@ -127,9 +127,7 @@ search_dir  /etc/security 1
 
 # ── 4. systemd units ──────────────────────────────────────────────────────────
 header "systemd unit files"
-if [[ $SKIP_UNITS -eq 1 ]]; then
-    echo -e "  ${DIM}(skipped via --skip-units)${RST}"
-else
+if [[ $SKIP_UNITS -ne 1 ]]; then
 i=0
 for unit_dir in /etc/systemd/system /usr/lib/systemd/system /run/systemd/system; do
     [[ -d "$unit_dir" ]] || continue
@@ -181,12 +179,16 @@ found_procs=0
 for environ_file in /proc/*/environ; do
     pid="${environ_file#/proc/}"; pid="${pid%/environ}"
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    [[ "$pid" != "$$" ]] || continue  # script process
     [[ -r "$environ_file" ]] || continue
     own_procs=1
     value=$(tr '\0' '\n' < "$environ_file" 2>/dev/null | grep "^${VARNAME}=" || true)
     if [[ -n "$value" ]]; then
         comm=$(cat "/proc/${pid}/comm" 2>/dev/null || echo "?")
-        echo -e "  ${GRN}✔ PID ${pid} (${comm})${RST}"
+        ppid=$(awk '/^PPid:/{print $2}' "/proc/${pid}/status" 2>/dev/null || echo "?")
+        pcomm=$(cat "/proc/${ppid}/comm" 2>/dev/null || echo "?")
+        (( pid = $PPID )) && this_proc=true || unset this_proc
+        echo -e "  ${GRN}✔ PID ${pid} (${comm})  ←  PPID ${ppid} (${pcomm})${DIM}${this_proc:+this}${RST}"
         echo -e "    ${YEL}${value}${RST}"
         FOUND=1; found_procs=1
     fi
