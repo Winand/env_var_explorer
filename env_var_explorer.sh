@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# find_env_var.sh — locate where an environment variable is defined
+# find_env_var.sh — locate where an environment variable is defined.
 # Works without root; skips unreadable locations gracefully.
 #
-# Usage:   ./find_env_var.sh VARNAME [--pid PID] [--quick]
-# Example: ./find_env_var.sh AIRFLOW_HOME
-#          ./find_env_var.sh AIRFLOW_HOME --pid 1234
-#          ./find_env_var.sh AIRFLOW_HOME --pid 1234 --quick
+# Usage: ./find_env_var.sh VARNAME
+#        ./find_env_var.sh --help
 
-shopt -s nullglob   # globs that match nothing expand to nothing, not literal string
+shopt -s nullglob
 
 RED='\033[0;31m'
 YEL='\033[1;33m'
@@ -18,52 +16,54 @@ DIM='\033[2m'
 RST='\033[0m'
 
 usage() {
-    echo "Usage: $0 VARNAME [--pid PID] [--quick]"
-    echo "  VARNAME   environment variable to search for (e.g. AIRFLOW_HOME)"
-    echo "  --pid     also inspect /proc/<pid>/environ for a specific process"
-    echo "  --quick   with --pid: show that PID first, then skip the rest of the search"
-    exit 1
+    cat <<EOF
+Usage: $(basename "$0") VARNAME
+
+Search for where an environment variable is defined across:
+  - System-wide shell init  (/etc/bashrc, /etc/profile, etc.)
+  - User shell init files   (~/.bashrc, ~/.bash_profile, etc.)
+  - PAM environment         (/etc/security/pam_env.conf)
+  - systemd unit files      (Environment= and EnvironmentFile= directives,
+                             with recursive scanning of referenced files)
+  - Sysconfig / app dirs    (/etc/sysconfig/, /etc/default/, /etc/conf.d/)
+  - Live processes          (/proc/*/environ, own user only without root)
+  - Running Docker containers (via docker inspect)
+
+Unreadable locations are skipped with a notice; re-run with sudo for full coverage.
+
+Options:
+  -h, --help    Show this help and exit
+
+Example:
+  $(basename "$0") AIRFLOW_HOME
+EOF
+    exit 0
 }
 
-[[ $# -lt 1 ]] && usage
+[[ $# -lt 1 ]]                          && { echo "Error: VARNAME required."; echo "Try '$(basename "$0") --help'"; exit 1; }
+[[ "$1" == "--help" || "$1" == "-h" ]]  && usage
 
 VARNAME="$1"
-TARGET_PID=""
-QUICK=0
 FOUND=0
 SKIPPED=0
 
-shift
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --pid)   TARGET_PID="$2"; shift 2 ;;
-        --quick) QUICK=1; shift ;;
-        *)       echo "Unknown argument: $1"; usage ;;
-    esac
-done
-
-[[ $QUICK -eq 1 && -z "$TARGET_PID" ]] && { echo "--quick requires --pid"; usage; }
+# Regex for shell-syntax files
+RE_SHELL="(^|[[:space:]]|;)export[[:space:]]+${VARNAME}[=[:space:]]|^[[:space:]]*${VARNAME}[[:space:]]*="
+# Regex for YAML/Docker Compose
+# RE_YAML="^[[:space:]]*-?[[:space:]]*${VARNAME}[[:space:]]*[:=]"
 
 header()   { echo -e "\n${BLD}${CYN}=== $1 ===${RST}"; }
 skip_msg() { echo -e "  ${DIM}(skipped — not readable: $1)${RST}"; SKIPPED=1; }
-
-# ── File search helpers ────────────────────────────────────────────────────────
-
-# Regex for shell-style files: "export VAR=..." or "VAR=..."
-RE_SHELL="(^|[[:space:]]|;)export[[:space:]]+${VARNAME}[=[:space:]]|^[[:space:]]*${VARNAME}[[:space:]]*="
-
-# Regex for YAML/Docker Compose: "- VAR=..." or "VAR: ..." (with any indentation)
-RE_YAML="^[[:space:]]*-?[[:space:]]*${VARNAME}[[:space:]]*[:=]"
+clear_progress() { printf "\r%-60s\r" " "; }   # overwrite progress line with spaces
 
 search_file() {
-    local file="$1"
-    local re="${2:-$RE_SHELL}"
+    local file="$1" re="${2:-$RE_SHELL}" ref="$3"
     [[ -e "$file" ]] || return 0
     if [[ ! -r "$file" ]]; then skip_msg "$file"; return 0; fi
     local matches
     matches=$(grep -nE "$re" "$file" 2>/dev/null || true)
     if [[ -n "$matches" ]]; then
-        echo -e "  ${GRN}✔ ${file}${RST}"
+        echo -e "  ${GRN}✔ ${ref}${ref:+ references }${file}${RST}"
         while IFS= read -r line; do
             echo -e "    ${YEL}${line}${RST}"
         done <<< "$matches"
@@ -82,47 +82,10 @@ search_dir() {
               -print0 2>/dev/null)
 }
 
-# ── PID helper (used early if --pid given, and again in section 7) ─────────────
-
-check_pid() {
-    local pid="$1"
-    local environ_file="/proc/${pid}/environ"
-    if [[ ! -e "$environ_file" ]]; then
-        echo -e "  ${RED}PID ${pid} does not exist.${RST}"; return
-    fi
-    if [[ ! -r "$environ_file" ]]; then
-        skip_msg "$environ_file (need root or same user)"; return
-    fi
-    local value
-    value=$(tr '\0' '\n' < "$environ_file" 2>/dev/null | grep "^${VARNAME}=" || true)
-    local comm
-    comm=$(cat "/proc/${pid}/comm" 2>/dev/null || echo "?")
-    if [[ -n "$value" ]]; then
-        echo -e "  ${GRN}✔ PID ${pid} (${comm})${RST}"
-        echo -e "    ${YEL}${value}${RST}"
-        FOUND=1
-    else
-        echo -e "  ${DIM}${VARNAME} not set in PID ${pid} (${comm}).${RST}"
-    fi
-}
-
-# ── If --pid given, check it first (before any disk search) ───────────────────
-
-if [[ -n "$TARGET_PID" ]]; then
-    header "Environment of PID ${TARGET_PID} (checked first)"
-    check_pid "$TARGET_PID"
-    if [[ $QUICK -eq 1 ]]; then
-        echo -e "\n${DIM}(--quick: skipping full filesystem search)${RST}"
-        echo ""
-        [[ $FOUND -eq 1 ]] \
-            && echo -e "${GRN}${BLD}Found!${RST}" \
-            || echo -e "${RED}${BLD}${VARNAME} not found in PID ${TARGET_PID}.${RST}"
-        exit 0
-    fi
-fi
-
 # ── 1. System-wide shell init ──────────────────────────────────────────────────
 header "System-wide shell init"
+search_file /etc/bashrc
+search_file /etc/bash.bashrc
 search_file /etc/environment
 search_file /etc/profile
 search_dir  /etc/profile.d 1
@@ -138,7 +101,6 @@ done
 
 # ── 3. PAM environment ─────────────────────────────────────────────────────────
 header "PAM environment"
-search_file /etc/security/pam_env.conf
 search_dir  /etc/security 1
 
 # ── 4. systemd units ──────────────────────────────────────────────────────────
@@ -149,19 +111,35 @@ for unit_dir in /etc/systemd/system /usr/lib/systemd/system /run/systemd/system;
     if [[ ! -r "$unit_dir" ]]; then skip_msg "$unit_dir"; continue; fi
     while IFS= read -r -d '' f; do
         [[ -r "$f" ]] || continue
-        printf "\r  ${DIM}Scanned $((i++)) units${RST}"
-        # Single grep pass: collect lines, print only if non-empty
+        printf "\r  ${DIM}Scanning unit %d: %-50s${RST}\r" "$((++i))" "$(basename "$f")"
+
         matches=$(grep -niE "^\s*(Environment|EnvironmentFile).*${VARNAME}" "$f" 2>/dev/null || true)
         if [[ -n "$matches" ]]; then
-            echo -e "\r  ${GRN}✔ ${f}${RST}"
+            clear_progress
+            echo -e "  ${GRN}✔ ${f}${RST}"
             while IFS= read -r line; do
                 echo -e "    ${YEL}${line}${RST}"
             done <<< "$matches"
             FOUND=1
         fi
+
+        # Scan files referenced by EnvironmentFile= regardless of whether VARNAME
+        # was found above — the unit itself might not mention VARNAME but its
+        # EnvironmentFile might.
+        while IFS= read -r env_file_line; do
+            # Strip the directive name, handle optional leading minus (ignore-errors marker)
+            env_file=$(echo "$env_file_line" | sed 's/^\s*EnvironmentFile\s*=\s*-\?//')
+            # Skip empty or obviously invalid values
+            [[ -z "$env_file" || "$env_file" == *'$'* ]] && continue
+            if [[ -e "$env_file" ]]; then
+                clear_progress
+                search_file "$env_file" "$RE_SHELL" "$f"
+            fi
+        done < <(grep -iE "^\s*EnvironmentFile\s*=" "$f" 2>/dev/null || true)
+
     done < <(find "$unit_dir" -maxdepth 2 -type f -print0 2>/dev/null)
 done
-printf "\r                    "  # clear last "Scanned N units" message
+clear_progress
 
 # ── 5. Common application / sysconfig dirs ────────────────────────────────────
 header "Application / sysconfig files"
@@ -174,14 +152,10 @@ search_dir /etc/environment.d 1
 header "Live processes with ${VARNAME} in their environment"
 own_procs=0
 found_procs=0
-
 for environ_file in /proc/*/environ; do
     pid="${environ_file#/proc/}"; pid="${pid%/environ}"
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
-    # Skip the PID we already checked above to avoid duplicate output
-    [[ -n "$TARGET_PID" && "$pid" == "$TARGET_PID" ]] && continue
     [[ -r "$environ_file" ]] || continue
-
     own_procs=1
     value=$(tr '\0' '\n' < "$environ_file" 2>/dev/null | grep "^${VARNAME}=" || true)
     if [[ -n "$value" ]]; then
@@ -191,7 +165,6 @@ for environ_file in /proc/*/environ; do
         FOUND=1; found_procs=1
     fi
 done
-
 if   [[ $own_procs -eq 0 ]];   then echo -e "  ${DIM}(no process environments readable without root)${RST}"; SKIPPED=1
 elif [[ $found_procs -eq 0 ]]; then echo -e "  ${DIM}(none of your readable processes have ${VARNAME} set)${RST}"
 fi
@@ -208,7 +181,6 @@ else
     while IFS= read -r container_id; do
         [[ -z "$container_id" ]] && continue
         name=$(docker inspect --format '{{.Name}}' "$container_id" 2>/dev/null | sed 's|^/||')
-        # docker inspect returns env as ["VAR=val", ...] — grep is enough
         value=$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
                 "$container_id" 2>/dev/null | grep "^${VARNAME}=" || true)
         if [[ -n "$value" ]]; then
